@@ -1,0 +1,6 @@
+"use client";
+import type { SlideSpec } from "@/lib/presentation/types";
+export default function SlideThumbnail({ slide,index,active,onClick }:{slide:SlideSpec;index:number;active:boolean;onClick:()=>void}){
+ const img=slide.elements.find(e=>e.type==="image" && e.src);
+ return <button onClick={onClick} className={`group w-full text-left transition ${active?"scale-[1.02]":"opacity-70 hover:opacity-100"}`}><div className={`relative aspect-video overflow-hidden rounded-xl border ${active?"border-violet-400/70 ring-2 ring-violet-500/20":"border-white/10 hover:border-white/20"}`}>{img?.type==="image"&&img.src?<img src={img.src} alt="" className="absolute inset-0 h-full w-full object-cover"/>:<div className="absolute inset-0 bg-gradient-to-br from-violet-950 via-[#10131d] to-blue-950"/>}<div className="absolute inset-0 bg-black/55"/><div className="relative z-10 flex h-full flex-col justify-center p-3"><p className="mb-1 truncate text-[7px] uppercase tracking-wider text-violet-300">{slide.subtitle||"SLIDE"}</p><p className="line-clamp-2 text-[11px] font-bold leading-tight text-white">{slide.title}</p><p className="mt-2 line-clamp-2 text-[7px] text-white/50">{slide.bullets.slice(0,2).join(" • ")}</p></div><div className="absolute bottom-2 left-2 rounded-md bg-black/50 px-1.5 py-0.5 text-[8px] text-white/50">{index+1}</div></div></button>
+}

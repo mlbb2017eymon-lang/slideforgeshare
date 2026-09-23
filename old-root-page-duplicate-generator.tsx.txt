@@ -1,0 +1,925 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
+import SlideEditor from "@/components/presentation/SlideEditor";
+
+type Profile = {
+  email: string | null;
+  full_name: string | null;
+  credits: number;
+};
+
+type PresentationStyle =
+  | "dark"
+  | "minimal"
+  | "corporate"
+  | "creative"
+  | "futuristic"
+  | "modern";
+
+type Slide = {
+  title: string;
+  subtitle: string;
+  bullets: string[];
+  visual: string;
+  image?: string;
+};
+
+type Presentation = {
+  title: string;
+  description: string;
+  slides: Slide[];
+  style?: PresentationStyle;
+};
+
+const styles: {
+  id: PresentationStyle;
+  name: string;
+  description: string;
+}[] = [
+  {
+    id: "dark",
+    name: "Dark",
+    description: "Bold & cinematic",
+  },
+  {
+    id: "minimal",
+    name: "Minimal",
+    description: "Clean & elegant",
+  },
+  {
+    id: "corporate",
+    name: "Corporate",
+    description: "Professional",
+  },
+  {
+    id: "creative",
+    name: "Creative",
+    description: "Expressive & colorful",
+  },
+  {
+    id: "futuristic",
+    name: "Futuristic",
+    description: "Tech & modern",
+  },
+  {
+    id: "modern",
+    name: "Modern",
+    description: "Balanced & polished",
+  },
+];
+
+const slideOptions = [5, 6, 8, 10, 12];
+
+const languages = [
+  { id: "English", label: "English", flag: "EN" },
+  { id: "Russian", label: "Русский", flag: "RU" },
+  { id: "Uzbek", label: "O'zbekcha", flag: "UZ" },
+];
+
+export default function WorkspacePage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const supabase = useMemo(() => createClient(), []);
+
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const [prompt, setPrompt] = useState("");
+  const [style, setStyle] = useState<PresentationStyle>("futuristic");
+  const [language, setLanguage] = useState("English");
+  const [slideCount, setSlideCount] = useState(6);
+
+  const [presentation, setPresentation] =
+    useState<Presentation | null>(null);
+
+  const [currentSlide, setCurrentSlide] = useState(0);
+
+  const [generating, setGenerating] = useState(false);
+  const [imageGenerating, setImageGenerating] = useState(false);
+  const [imageProgress, setImageProgress] = useState(0);
+
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const incomingPrompt = searchParams.get("prompt");
+    const incomingSlides = Number(searchParams.get("slides"));
+    const incomingLanguage = searchParams.get("language");
+    const incomingStyle = searchParams.get("style");
+
+    if (incomingPrompt) setPrompt(incomingPrompt);
+    if ([5, 6, 8, 10, 12].includes(incomingSlides)) {
+      setSlideCount(incomingSlides);
+    }
+    if (incomingLanguage && ["English", "Russian", "Uzbek"].includes(incomingLanguage)) {
+      setLanguage(incomingLanguage);
+    }
+    if (incomingStyle) {
+      const normalized = incomingStyle.toLowerCase();
+      const matched = ["dark", "minimal", "corporate", "creative", "futuristic", "modern"].find(
+        (value) => value === normalized
+      );
+      if (matched) setStyle(matched as PresentationStyle);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadWorkspace() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        router.replace("/login?next=/workspace");
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("email, full_name, credits")
+        .eq("id", user.id)
+        .single();
+
+      if (!mounted) return;
+
+      setProfile(
+        data ?? {
+          email: user.email ?? null,
+          full_name: null,
+          credits: 10,
+        }
+      );
+
+      if (error) {
+        console.error("Profile load error:", error);
+      }
+
+      setLoading(false);
+    }
+
+    loadWorkspace();
+
+    return () => {
+      mounted = false;
+    };
+  }, [router, supabase]);
+
+  async function signOut() {
+    await supabase.auth.signOut();
+    router.replace("/");
+    router.refresh();
+  }
+
+  async function generatePresentation() {
+    if (!prompt.trim() || generating) return;
+
+    setGenerating(true);
+    setError("");
+    setPresentation(null);
+    setCurrentSlide(0);
+    setImageProgress(0);
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          prompt: prompt.trim(),
+          style,
+          language,
+          slideCount,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error || "Failed to generate presentation."
+        );
+      }
+
+      if (!data?.slides || !Array.isArray(data.slides)) {
+        throw new Error("The AI returned an invalid presentation.");
+      }
+
+      const generated: Presentation = {
+        title: data.title || "Untitled presentation",
+        description: data.description || "",
+        slides: data.slides,
+        style,
+      };
+
+      setPresentation(generated);
+
+      // Images are generated after the story is ready.
+      await generateImages(generated);
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong while generating."
+      );
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function generateImages(basePresentation: Presentation) {
+    if (!basePresentation.slides.length) return;
+
+    setImageGenerating(true);
+    setImageProgress(0);
+
+    const slides = [...basePresentation.slides];
+
+    for (let i = 0; i < slides.length; i++) {
+      const slide = slides[i];
+
+      try {
+        const response = await fetch("/api/generate-image", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: slide.title,
+            subtitle: slide.subtitle,
+            visual: slide.visual,
+            style,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data?.image) {
+          slides[i] = {
+            ...slides[i],
+            image: data.image,
+          };
+
+          setPresentation({
+            ...basePresentation,
+            slides: [...slides],
+          });
+        }
+      } catch (err) {
+        console.error(`Image generation failed for slide ${i + 1}:`, err);
+      }
+
+      setImageProgress(
+        Math.round(((i + 1) / slides.length) * 100)
+      );
+    }
+
+    setImageGenerating(false);
+  }
+
+  async function regenerateCurrentImage() {
+    if (!presentation || imageGenerating) return;
+
+    const slide = presentation.slides[currentSlide];
+
+    if (!slide) return;
+
+    setImageGenerating(true);
+    setError("");
+
+    try {
+      const response = await fetch("/api/generate-image", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: slide.title,
+          subtitle: slide.subtitle,
+          visual: slide.visual,
+          style,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data?.image) {
+        throw new Error(
+          data?.error || "Failed to regenerate image."
+        );
+      }
+
+      const updatedSlides = [...presentation.slides];
+
+      updatedSlides[currentSlide] = {
+        ...updatedSlides[currentSlide],
+        image: data.image,
+      };
+
+      setPresentation({
+        ...presentation,
+        slides: updatedSlides,
+      });
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to regenerate image."
+      );
+    } finally {
+      setImageGenerating(false);
+    }
+  }
+
+  function newPresentation() {
+    setPresentation(null);
+    setCurrentSlide(0);
+    setPrompt("");
+    setError("");
+    setImageProgress(0);
+  }
+
+  if (loading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#07080c] text-white">
+        <div className="rounded-full border border-white/10 bg-white/[0.05] px-5 py-3 text-sm text-white/60 backdrop-blur-xl">
+          Loading workspace...
+        </div>
+      </main>
+    );
+  }
+
+  const displayName =
+    profile?.full_name ||
+    profile?.email?.split("@")[0] ||
+    "Creator";
+
+  const activeSlide = presentation?.slides[currentSlide];
+
+  return (
+    <main className="relative min-h-screen overflow-hidden bg-[#07080c] text-white">
+      {/* BACKGROUND */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div
+          className="absolute -left-40 -top-40 h-[600px] w-[600px] rounded-full blur-3xl"
+          style={{
+            background:
+              "radial-gradient(circle, rgba(139,92,246,.22), transparent 68%)",
+          }}
+        />
+
+        <div
+          className="absolute -right-40 top-[20%] h-[700px] w-[700px] rounded-full blur-3xl"
+          style={{
+            background:
+              "radial-gradient(circle, rgba(59,130,246,.16), transparent 68%)",
+          }}
+        />
+
+        <div
+          className="absolute bottom-[-250px] left-[30%] h-[500px] w-[500px] rounded-full blur-3xl"
+          style={{
+            background:
+              "radial-gradient(circle, rgba(217,70,239,.10), transparent 70%)",
+          }}
+        />
+
+        <div className="absolute inset-0 opacity-[0.035] [background-image:linear-gradient(rgba(255,255,255,.3)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.3)_1px,transparent_1px)] [background-size:64px_64px]" />
+      </div>
+
+      <div className="relative z-10 flex min-h-screen">
+        {/* SIDEBAR */}
+        <aside className="hidden w-[250px] shrink-0 border-r border-white/10 bg-black/20 p-5 backdrop-blur-2xl lg:flex lg:flex-col">
+          <button
+            onClick={() => router.push("/")}
+            className="mb-10 flex items-center gap-3 text-left"
+          >
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-blue-500 font-black shadow-lg shadow-violet-500/20">
+              S
+            </div>
+
+            <div>
+              <div className="font-bold tracking-tight">
+                SlideForge
+              </div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-white/30">
+                AI Presentation
+              </div>
+            </div>
+          </button>
+
+          <nav className="space-y-1.5">
+            <button
+              className="flex w-full items-center gap-3 rounded-xl bg-white/10 px-4 py-3 text-left text-sm font-medium"
+            >
+              <span className="text-violet-300">✦</span>
+              Create
+            </button>
+
+            <button
+              onClick={() => router.push("/")}
+              className="flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-sm text-white/45 transition hover:bg-white/[0.05] hover:text-white"
+            >
+              <span>⌂</span>
+              Home
+            </button>
+
+            <button
+              onClick={newPresentation}
+              className="flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-sm text-white/45 transition hover:bg-white/[0.05] hover:text-white"
+            >
+              <span>＋</span>
+              New presentation
+            </button>
+          </nav>
+
+          <div className="mt-auto space-y-3">
+            <div className="rounded-2xl border border-violet-400/10 bg-violet-500/[0.06] p-4">
+              <p className="text-xs text-white/35">
+                Available credits
+              </p>
+
+              <div className="mt-2 flex items-end justify-between">
+                <p className="text-3xl font-bold">
+                  {profile?.credits ?? 0}
+                </p>
+
+                <span className="pb-1 text-xs text-violet-300">
+                  credits
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={signOut}
+              className="w-full rounded-xl border border-white/10 px-4 py-3 text-sm text-white/45 transition hover:bg-white/[0.05] hover:text-white"
+            >
+              Sign out
+            </button>
+          </div>
+        </aside>
+
+        {/* MAIN */}
+        <section className="min-w-0 flex-1">
+          {/* HEADER */}
+          <header className="sticky top-0 z-30 flex items-center justify-between border-b border-white/10 bg-[#07080c]/75 px-5 py-4 backdrop-blur-2xl sm:px-8">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => router.push("/")}
+                className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] lg:hidden"
+              >
+                ←
+              </button>
+
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-white/30">
+                  Workspace
+                </p>
+
+                <h1 className="font-semibold">
+                  {presentation?.title || "Create presentation"}
+                </h1>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 sm:gap-3">
+              <div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-white/60 sm:px-4 sm:text-sm">
+                ✦ {profile?.credits ?? 0}
+                <span className="hidden sm:inline"> credits</span>
+              </div>
+
+              {presentation && (
+                <button
+                  onClick={newPresentation}
+                  className="hidden rounded-full border border-white/10 px-4 py-2 text-sm text-white/60 transition hover:bg-white/10 hover:text-white sm:block"
+                >
+                  New
+                </button>
+              )}
+
+              <button
+                onClick={signOut}
+                className="rounded-full border border-white/10 px-3 py-2 text-xs text-white/60 transition hover:bg-white/10 hover:text-white sm:px-4 sm:text-sm"
+              >
+                Sign out
+              </button>
+            </div>
+          </header>
+
+          {!presentation ? (
+            /* ============================================================
+               GENERATOR
+               ============================================================ */
+            <div className="mx-auto max-w-6xl px-5 py-10 sm:px-8 sm:py-14">
+              <div className="mx-auto max-w-3xl text-center">
+                <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-violet-400/15 bg-violet-500/[0.06] px-4 py-2 text-xs font-medium text-violet-200">
+                  <span className="h-1.5 w-1.5 rounded-full bg-violet-400 shadow-[0_0_12px_rgba(167,139,250,.9)]" />
+                  AI Presentation Studio
+                </div>
+
+                <p className="mb-4 text-sm text-violet-300">
+                  Welcome, {displayName}
+                </p>
+
+                <h2 className="text-4xl font-bold tracking-[-0.04em] sm:text-6xl">
+                  What will you
+                  <br />
+                  <span className="bg-gradient-to-r from-white via-violet-200 to-blue-300 bg-clip-text text-transparent">
+                    create today?
+                  </span>
+                </h2>
+
+                <p className="mx-auto mt-5 max-w-2xl text-sm leading-7 text-white/45 sm:text-base">
+                  Describe your idea and SlideForge will turn it into a
+                  structured presentation with AI storytelling and visuals.
+                </p>
+              </div>
+
+              {/* PROMPT CARD */}
+              <div className="mx-auto mt-10 max-w-5xl rounded-[28px] border border-white/10 bg-white/[0.045] p-3 shadow-2xl shadow-black/20 backdrop-blur-2xl sm:p-5">
+                <div className="rounded-[22px] border border-white/5 bg-black/20 p-5 sm:p-6">
+                  <div className="mb-4 flex items-center justify-between">
+                    <span className="text-xs font-medium uppercase tracking-[0.16em] text-white/30">
+                      Your idea
+                    </span>
+
+                    <span className="text-xs text-white/25">
+                      {prompt.length}/1000
+                    </span>
+                  </div>
+
+                  <textarea
+                    value={prompt}
+                    maxLength={1000}
+                    onChange={(event) =>
+                      setPrompt(event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (
+                        (event.ctrlKey || event.metaKey) &&
+                        event.key === "Enter"
+                      ) {
+                        event.preventDefault();
+                        generatePresentation();
+                      }
+                    }}
+                    placeholder="e.g. Create a presentation about the future of renewable energy..."
+                    className="min-h-[180px] w-full resize-none bg-transparent text-lg leading-8 text-white outline-none placeholder:text-white/20 sm:text-xl"
+                  />
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {[
+                      "AI in education",
+                      "Startup pitch deck",
+                      "Climate change",
+                      "Product launch",
+                    ].map((example) => (
+                      <button
+                        key={example}
+                        onClick={() => setPrompt(example)}
+                        className="rounded-full border border-white/10 bg-white/[0.025] px-3 py-1.5 text-xs text-white/40 transition hover:border-violet-400/20 hover:bg-violet-500/[0.06] hover:text-white/70"
+                      >
+                        {example}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* CONTROLS */}
+                <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                  {/* Slides */}
+                  <div className="rounded-2xl border border-white/8 bg-white/[0.025] p-4">
+                    <div className="mb-2 text-[10px] uppercase tracking-[0.16em] text-white/30">
+                      Slides
+                    </div>
+
+                    <select
+                      value={slideCount}
+                      onChange={(event) =>
+                        setSlideCount(Number(event.target.value))
+                      }
+                      className="w-full bg-transparent text-sm font-medium text-white outline-none"
+                    >
+                      {slideOptions.map((count) => (
+                        <option
+                          key={count}
+                          value={count}
+                          className="bg-[#111217]"
+                        >
+                          {count} slides
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Language */}
+                  <div className="rounded-2xl border border-white/8 bg-white/[0.025] p-4">
+                    <div className="mb-2 text-[10px] uppercase tracking-[0.16em] text-white/30">
+                      Language
+                    </div>
+
+                    <select
+                      value={language}
+                      onChange={(event) =>
+                        setLanguage(event.target.value)
+                      }
+                      className="w-full bg-transparent text-sm font-medium text-white outline-none"
+                    >
+                      {languages.map((item) => (
+                        <option
+                          key={item.id}
+                          value={item.id}
+                          className="bg-[#111217]"
+                        >
+                          {item.flag} · {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Style */}
+                  <div className="rounded-2xl border border-white/8 bg-white/[0.025] p-4">
+                    <div className="mb-2 text-[10px] uppercase tracking-[0.16em] text-white/30">
+                      Style
+                    </div>
+
+                    <select
+                      value={style}
+                      onChange={(event) =>
+                        setStyle(
+                          event.target.value as PresentationStyle
+                        )
+                      }
+                      className="w-full bg-transparent text-sm font-medium text-white outline-none"
+                    >
+                      {styles.map((item) => (
+                        <option
+                          key={item.id}
+                          value={item.id}
+                          className="bg-[#111217]"
+                        >
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* GENERATE */}
+                <button
+                  onClick={generatePresentation}
+                  disabled={!prompt.trim() || generating}
+                  className="mt-3 flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-violet-600 via-indigo-600 to-blue-600 px-6 py-4 font-semibold shadow-xl shadow-violet-500/15 transition hover:-translate-y-0.5 hover:shadow-violet-500/25 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
+                >
+                  {generating ? (
+                    <>
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      Creating your presentation...
+                    </>
+                  ) : (
+                    <>
+                      <span>✦</span>
+                      Generate presentation
+                      <span className="text-white/50">⌘↵</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* STYLE CARDS */}
+              <div className="mx-auto mt-10 max-w-5xl">
+                <div className="mb-4 flex items-end justify-between">
+                  <div>
+                    <p className="text-sm font-semibold">
+                      Choose your visual direction
+                    </p>
+                    <p className="mt-1 text-xs text-white/30">
+                      You can change the theme later in the editor.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                  {styles.map((item) => {
+                    const selected = style === item.id;
+
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => setStyle(item.id)}
+                        className={`group rounded-2xl border p-4 text-left transition ${
+                          selected
+                            ? "border-violet-400/40 bg-violet-500/[0.10] shadow-lg shadow-violet-500/10"
+                            : "border-white/10 bg-white/[0.025] hover:border-white/20 hover:bg-white/[0.05]"
+                        }`}
+                      >
+                        <div
+                          className={`mb-4 h-16 rounded-xl ${
+                            item.id === "dark"
+                              ? "bg-gradient-to-br from-black via-zinc-800 to-violet-900"
+                              : item.id === "minimal"
+                                ? "bg-gradient-to-br from-white to-zinc-300"
+                                : item.id === "corporate"
+                                  ? "bg-gradient-to-br from-slate-700 to-blue-950"
+                                  : item.id === "creative"
+                                    ? "bg-gradient-to-br from-fuchsia-600 via-violet-600 to-cyan-500"
+                                    : "bg-gradient-to-br from-violet-700 via-blue-600 to-cyan-500"
+                          }`}
+                        />
+
+                        <div className="text-sm font-semibold">
+                          {item.name}
+                        </div>
+
+                        <div className="mt-1 text-xs text-white/30">
+                          {item.description}
+                        </div>
+
+                        {selected && (
+                          <div className="mt-3 text-[10px] font-semibold uppercase tracking-wider text-violet-300">
+                            Selected
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* FEATURES */}
+              <div className="mx-auto mt-12 grid max-w-5xl gap-3 sm:grid-cols-3">
+                {[
+                  [
+                    "✦",
+                    "AI storytelling",
+                    "Turn a simple idea into a structured narrative.",
+                  ],
+                  [
+                    "◈",
+                    "AI visuals",
+                    "Generate a custom visual direction for every slide.",
+                  ],
+                  [
+                    "↗",
+                    "Ready to export",
+                    "Turn your finished presentation into a PPTX.",
+                  ],
+                ].map(([icon, title, description]) => (
+                  <div
+                    key={title}
+                    className="rounded-2xl border border-white/8 bg-white/[0.025] p-5"
+                  >
+                    <div className="mb-4 text-xl text-violet-300">
+                      {icon}
+                    </div>
+
+                    <h3 className="text-sm font-semibold">
+                      {title}
+                    </h3>
+
+                    <p className="mt-2 text-sm leading-6 text-white/35">
+                      {description}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              {error && (
+                <div className="mx-auto mt-6 max-w-5xl rounded-2xl border border-red-400/20 bg-red-500/[0.06] px-5 py-4 text-sm text-red-200">
+                  {error}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* ============================================================
+               PRESENTATION PREVIEW
+               ============================================================ */
+            <div className="mx-auto max-w-[1500px] px-4 py-5 sm:px-6">
+              {/* GENERATION STATUS */}
+              {imageGenerating && (
+                <div className="mb-4 overflow-hidden rounded-2xl border border-violet-400/10 bg-violet-500/[0.05]">
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center gap-3">
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-violet-400" />
+
+                      <span className="text-sm text-white/70">
+                        Creating AI visuals...
+                      </span>
+                    </div>
+
+                    <span className="text-xs text-violet-300">
+                      {imageProgress}%
+                    </span>
+                  </div>
+
+                  <div className="h-1 bg-white/5">
+                    <div
+                      className="h-full bg-gradient-to-r from-violet-500 to-blue-500 transition-all duration-500"
+                      style={{ width: `${imageProgress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* PRESENTATION HEADER */}
+              <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <button
+                    onClick={newPresentation}
+                    className="mb-3 text-xs text-white/35 transition hover:text-white"
+                  >
+                    ← Create another
+                  </button>
+
+                  <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">
+                    {presentation.title}
+                  </h2>
+
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-white/40">
+                    {presentation.description}
+                  </p>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={regenerateCurrentImage}
+                    disabled={imageGenerating}
+                    className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm text-white/65 transition hover:bg-white/[0.08] hover:text-white disabled:opacity-40"
+                  >
+                    ↻ Regenerate visual
+                  </button>
+
+                  <button
+                    className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm text-white/65 transition hover:bg-white/[0.08] hover:text-white"
+                  >
+                    Present
+                  </button>
+
+                  <button
+                    className="rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold shadow-lg shadow-violet-500/10 transition hover:-translate-y-0.5"
+                  >
+                    Export
+                  </button>
+                </div>
+              </div>
+
+              {/* PRESENTATION EDITOR */}
+              <SlideEditor
+                slides={presentation.slides}
+                onChange={(updatedSlides) => {
+                  setPresentation({
+                    ...presentation,
+                    slides: updatedSlides,
+                  });
+                }}
+              />
+
+              {/* FUTURE EDITOR TOOLBAR */}
+              <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 backdrop-blur-xl">
+                <div className="flex flex-wrap items-center gap-2">
+                  {[
+                    ["＋", "Add"],
+                    ["T", "Text"],
+                    ["◈", "Image"],
+                    ["◇", "Shape"],
+                    ["▥", "Chart"],
+                    ["▤", "Table"],
+                    ["✦", "AI edit"],
+                  ].map(([icon, label]) => (
+                    <button
+                      key={label}
+                      className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[0.025] px-3 py-2 text-xs text-white/40 transition hover:border-white/15 hover:bg-white/[0.06] hover:text-white"
+                    >
+                      <span className="text-violet-300/70">
+                        {icon}
+                      </span>
+                      {label}
+                    </button>
+                  ))}
+
+                  <div className="ml-auto hidden text-xs text-white/20 sm:block">
+                    Editor tools coming in the next step
+                  </div>
+                </div>
+              </div>
+
+              {error && (
+                <div className="mt-4 rounded-2xl border border-red-400/20 bg-red-500/[0.06] px-5 py-4 text-sm text-red-200">
+                  {error}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+    </main>
+  );
+}
